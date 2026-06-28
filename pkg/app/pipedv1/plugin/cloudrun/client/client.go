@@ -1,4 +1,4 @@
-package cloudrun
+package client
 
 import (
 	"context"
@@ -244,4 +244,14 @@ func makeCloudRunServiceName(projectID, serviceID string) string {
 // makeCloudRunRevisionName returns the full resource path for a Cloud Run revision.
 func makeCloudRunRevisionName(projectID, revisionID string) string {
 	return fmt.Sprintf("namespaces/%s/revisions/%s", projectID, revisionID)
+}
+
+// NewClient opens a connection to the Cloud Run API for the given project and region.
+// If credentialsFile is provided, it is used for authentication; otherwise
+// Application Default Credentials are used.
+//
+// This is the exported entry point other packages (e.g. livestate, deployment)
+// should use to obtain a Client.
+func NewClient(ctx context.Context, projectID, region, credentialsFile string, logger *zap.Logger) (Client, error) {
+	return newClient(ctx, projectID, region, credentialsFile, logger)
 }

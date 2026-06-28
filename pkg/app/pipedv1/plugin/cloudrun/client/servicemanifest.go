@@ -1,4 +1,4 @@
-package cloudrun
+package client
 
 import (
 	"fmt"
@@ -27,6 +27,13 @@ func loadServiceManifest(path string) (ServiceManifest, error) {
 		return ServiceManifest{}, err
 	}
 	return ParseServiceManifest(data)
+}
+
+// LoadServiceManifest reads the service manifest file at the given path and parses it.
+// This is the exported entry point other packages (e.g. deployment, livestate)
+// should use to load a ServiceManifest from disk.
+func LoadServiceManifest(path string) (ServiceManifest, error) {
+	return loadServiceManifest(path)
 }
 
 // ParseServiceManifest parses the given YAML bytes into a ServiceManifest.

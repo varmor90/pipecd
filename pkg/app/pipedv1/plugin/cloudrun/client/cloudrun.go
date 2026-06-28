@@ -1,8 +1,9 @@
-package cloudrun
+package client
 
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"google.golang.org/api/run/v1"
 )
@@ -34,6 +35,12 @@ const (
 // only resources managed by this piped instance.
 func MakeManagedByPipedSelector() string {
 	return fmt.Sprintf("%s=%s", LabelManagedBy, ManagedByPiped)
+}
+
+// MakeApplicationSelector returns a label selector that matches only
+// resources managed by piped and belonging to the given application.
+func MakeApplicationSelector(appID string) string {
+	return fmt.Sprintf("%s=%s,%s=%s", LabelManagedBy, ManagedByPiped, LabelApplication, appID)
 }
 
 // MakeRevisionNamesSelector returns a label selector that matches
@@ -208,19 +215,20 @@ func (r *Revision) StatusConditions() *StatusConditions {
 	}
 }
 
-// HealthStatus translates the parsed conditions into a PipeCD health status.
+// HealthStatus translates the parsed conditions into a PipeCD health status,
+// together with a human-readable description explaining why.
 // Returns HEALTHY only if all required conditions are True.
 // Returns OTHER if any condition is explicitly False (error).
 // Returns UNKNOWN if any condition is unclear or missing.
-func (s *StatusConditions) HealthStatus() string {
+func (s *StatusConditions) HealthStatus() (status string, desc string) {
 	if s == nil {
-		return "UNKNOWN"
+		return "UNKNOWN", ""
 	}
 	if len(s.FalseMessages) > 0 {
-		return "OTHER"
+		return "OTHER", strings.Join(s.FalseMessages, "; ")
 	}
 	if len(s.UnknownMessages) > 0 {
-		return "UNKNOWN"
+		return "UNKNOWN", strings.Join(s.UnknownMessages, "; ")
 	}
 
 	mustPassConditions := TypeHealthyServiceConditions
@@ -229,8 +237,58 @@ func (s *StatusConditions) HealthStatus() string {
 	}
 	for k := range mustPassConditions {
 		if _, ok := s.TrueTypes[k]; !ok {
-			return "UNKNOWN"
+			return "UNKNOWN", fmt.Sprintf("condition %q is missing", k)
 		}
 	}
-	return "HEALTHY"
+	return "HEALTHY", ""
+}
+
+// UID returns the unique ID assigned by Cloud Run to this revision.
+func (r *Revision) UID() (string, bool) {
+	if r.Metadata == nil || r.Metadata.Uid == "" {
+		return "", false
+	}
+	return r.Metadata.Uid, true
+}
+
+// Name returns the name of this revision.
+func (r *Revision) Name() string {
+	if r.Metadata == nil {
+		return ""
+	}
+	return r.Metadata.Name
+}
+
+// Labels returns the labels attached to this revision.
+func (r *Revision) Labels() map[string]string {
+	if r.Metadata == nil {
+		return nil
+	}
+	return r.Metadata.Labels
+}
+
+// CreatedAt returns the time this revision was created.
+// It returns the zero time if the timestamp is missing or cannot be parsed.
+func (r *Revision) CreatedAt() time.Time {
+	if r.Metadata == nil || r.Metadata.CreationTimestamp == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, r.Metadata.CreationTimestamp)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// CreatedAt returns the time this service was created.
+// It returns the zero time if the timestamp is missing or cannot be parsed.
+func (s *Service) CreatedAt() time.Time {
+	if s.Metadata == nil || s.Metadata.CreationTimestamp == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s.Metadata.CreationTimestamp)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }

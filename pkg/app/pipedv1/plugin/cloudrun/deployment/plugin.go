@@ -16,10 +16,13 @@ package deployment
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"slices"
 
 	sdk "github.com/pipe-cd/piped-plugin-sdk-go"
 
+	"github.com/pipe-cd/pipecd/pkg/app/pipedv1/plugin/cloudrunservice/client"
 	"github.com/pipe-cd/pipecd/pkg/app/pipedv1/plugin/cloudrunservice/config"
 )
 
@@ -49,18 +52,65 @@ func (p *Plugin) BuildPipelineSyncStages(ctx context.Context, _ *sdk.ConfigNone,
 }
 
 func (p *Plugin) ExecuteStage(ctx context.Context, _ *sdk.ConfigNone, dts []*sdk.DeployTarget[config.CloudRunDeployTargetConfig], input *sdk.ExecuteStageInput[config.CloudRunApplicationSpec]) (*sdk.ExecuteStageResponse, error) {
-	// TODO implement me
-	panic("implement me")
+	var status sdk.StageStatus
+
+	switch input.Request.StageName {
+	case StageCloudRunSync:
+		status = executeSyncStage(ctx, input, dts)
+	case StageRollback:
+		status = executeRollbackStage(ctx, input, dts)
+	case StageCloudRunPromote:
+		input.Client.LogPersister().Error("CLOUDRUN_PROMOTE is not implemented yet")
+		status = sdk.StageStatusFailure
+	default:
+		input.Client.LogPersister().Errorf("Unsupported stage %q", input.Request.StageName)
+		status = sdk.StageStatusFailure
+	}
+
+	return &sdk.ExecuteStageResponse{Status: status}, nil
 }
 
 func (p *Plugin) DetermineVersions(ctx context.Context, _ *sdk.ConfigNone, input *sdk.DetermineVersionsInput[config.CloudRunApplicationSpec]) (*sdk.DetermineVersionsResponse, error) {
-	// TODO implement me
-	panic("implement me")
+	manifestPath, err := serviceManifestPath(input.Request.DeploymentSource)
+	if err != nil {
+		return nil, err
+	}
+
+	sm, err := client.LoadServiceManifest(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load service manifest: %w", err)
+	}
+
+	versions, err := client.FindArtifactVersions(sm)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find artifact versions: %w", err)
+	}
+
+	return &sdk.DetermineVersionsResponse{Versions: versions}, nil
 }
 
+// serviceManifestPath builds the full path to the service manifest file
+// (e.g. service.yaml) for the given deployment source, falling back to
+// the default filename if none was set in the application config.
+func serviceManifestPath(ds sdk.DeploymentSource[config.CloudRunApplicationSpec]) (string, error) {
+	if ds.ApplicationConfig == nil || ds.ApplicationConfig.Spec == nil {
+		return "", fmt.Errorf("application config spec is missing")
+	}
+
+	filename := ds.ApplicationConfig.Spec.Input.ServiceManifestFile
+	if filename == "" {
+		filename = client.DefaultServiceManifestFilename
+	}
+
+	return filepath.Join(ds.ApplicationDirectory, filename), nil
+}
+
+// DetermineStrategy intentionally has no Cloud Run-specific logic: deployment
+// decisions belong to the core, not the plugin (see proposal's separation of
+// concerns). Returning (nil, nil) tells the core to fall back to its own
+// default logic (PipelineSync) for choosing the deployment strategy.
 func (p *Plugin) DetermineStrategy(ctx context.Context, _ *sdk.ConfigNone, input *sdk.DetermineStrategyInput[config.CloudRunApplicationSpec]) (*sdk.DetermineStrategyResponse, error) {
-	// TODO implement me
-	panic("implement me")
+	return nil, nil
 }
 
 func (p *Plugin) BuildQuickSyncStages(ctx context.Context, _ *sdk.ConfigNone, input *sdk.BuildQuickSyncStagesInput) (*sdk.BuildQuickSyncStagesResponse, error) {
