@@ -129,5 +129,4 @@ Built against [PipeCD](https://github.com/pipe-cd/pipecd), a CNCF Sandbox projec
 maintainers for a codebase that was genuinely possible to learn from by reading it. Particular thanks to
 mentors Khanh Tran ([@khanhtc1202](https://github.com/khanhtc1202)) and Shinnosuke Sawada-Dazai
 ([@Warashi](https://github.com/Warashi)) for the original proposal review.
-
-If you'd like to know more about how this was built, I wrote about the process here: **[LinkedIn post — add link]**
+*
