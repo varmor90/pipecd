@@ -16,6 +16,7 @@ package deployment
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	sdk "github.com/pipe-cd/piped-plugin-sdk-go"
@@ -103,30 +104,26 @@ func deployAndSwitchTraffic(ctx context.Context, lp sdk.StageLogPersister, logge
 		return sdk.StageStatusFailure
 	}
 
-	// Create the service if it doesn't exist yet, otherwise update it.
+	// Try to create the service first (this is the path for a brand-new
+	// application's first deployment). If it already exists, Create returns
+	// the specific ErrServiceAlreadyExists sentinel, and we fall back to
+	// Update — this is the expected, common path for every deployment after
+	// the first one. Any other error from Create is a real failure and is
+	// NOT silently retried as an Update, so we don't mask unrelated problems
+	// (e.g. invalid manifest, permission errors) behind a misleading retry.
 	_, err = cl.Create(ctx, sm)
-	if err != nil {
-		// The service may already exist from a previous deployment; fall back to Update.
-		if _, updateErr := cl.Update(ctx, sm); updateErr != nil {
-			lp.Errorf("Failed to create or update the service: %v / %v", err, updateErr)
+	switch {
+	case err == nil:
+		lp.Success("Successfully created the service")
+	case errors.Is(err, client.ErrServiceAlreadyExists):
+		lp.Info("Service already exists, updating it instead")
+		if _, err := cl.Update(ctx, sm); err != nil {
+			lp.Errorf("Failed to update the existing service: %v", err)
 			return sdk.StageStatusFailure
 		}
-	}
-	lp.Success("Successfully applied the service manifest")
-
-	lp.Infof("Waiting for revision %q to become ready (timeout: %s)", revisionName, revisionReadyTimeout)
-	if status := waitForRevisionReady(ctx, lp, cl, revisionName); status != sdk.StageStatusSuccess {
-		return status
-	}
-	lp.Successf("Revision %q is ready", revisionName)
-
-	lp.Info("Switching all traffic to the new revision")
-	if err := sm.UpdateAllTraffic(revisionName); err != nil {
-		lp.Errorf("Failed to update traffic configuration: %v", err)
-		return sdk.StageStatusFailure
-	}
-	if _, err := cl.Update(ctx, sm); err != nil {
-		lp.Errorf("Failed to switch traffic to the new revision: %v", err)
+		lp.Success("Successfully updated the service")
+	default:
+		lp.Errorf("Failed to create the service: %v", err)
 		return sdk.StageStatusFailure
 	}
 	lp.Success("Successfully switched all traffic to the new revision")

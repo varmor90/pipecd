@@ -155,3 +155,57 @@ func deleteTestService(ctx context.Context, t *testing.T, project, region, crede
 		"Clean it up manually with: gcloud run services delete %s --project=%s --region=%s --quiet",
 		testServiceName, testServiceName, project, region)
 }
+
+// TestIntegration_CreateConflictErrorCode is a throwaway diagnostic test:
+// it creates the same service twice in a row to discover exactly what
+// HTTP status code and error shape Cloud Run returns on the second Create
+// call. This informs how we distinguish "already exists" from other
+// failures in deployAndSwitchTraffic.
+func TestIntegration_CreateConflictErrorCode(t *testing.T) {
+	project := requireEnv(t, "CLOUDRUN_TEST_PROJECT")
+	region := requireEnv(t, "CLOUDRUN_TEST_REGION")
+	credentialsFile := requireEnv(t, "CLOUDRUN_TEST_CREDENTIALS_FILE")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	t.Cleanup(func() {
+		t.Log("NOTE: clean up manually with: gcloud run services delete pipecd-conflict-test --project=" + project + " --region=" + region + " --quiet")
+	})
+
+	cl, err := client.NewClient(ctx, project, region, credentialsFile, zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	manifestYAML := `
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: pipecd-conflict-test
+spec:
+  template:
+    metadata:
+      name: pipecd-conflict-test-v1
+    spec:
+      containers:
+        - image: gcr.io/cloudrun/hello
+`
+	sm, err := client.ParseServiceManifest([]byte(manifestYAML))
+	if err != nil {
+		t.Fatalf("ParseServiceManifest failed: %v", err)
+	}
+
+	t.Log("First Create (should succeed)...")
+	if _, err := cl.Create(ctx, sm); err != nil {
+		t.Fatalf("first Create failed unexpectedly: %v", err)
+	}
+
+	t.Log("Second Create on the same service (expecting a conflict error)...")
+	_, err = cl.Create(ctx, sm)
+	if err == nil {
+		t.Fatal("expected an error on the second Create, got nil")
+	}
+	t.Logf("Error type: %T", err)
+	t.Logf("Error message: %v", err)
+}

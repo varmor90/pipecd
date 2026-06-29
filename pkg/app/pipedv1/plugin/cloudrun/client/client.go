@@ -12,11 +12,14 @@ import (
 	"google.golang.org/api/run/v1"
 )
 
-// Sentinel errors returned when a resource is not found in Cloud Run.
-// Callers can check for these to handle "not found" cases explicitly.
+// Sentinel errors returned for specific, recognizable failure conditions
+// from the Cloud Run API. Callers can check for these (with errors.Is)
+// to react to specific situations explicitly, instead of treating every
+// API error the same way.
 var (
-	ErrServiceNotFound  = fmt.Errorf("service not found")
-	ErrRevisionNotFound = fmt.Errorf("revision not found")
+	ErrServiceNotFound      = fmt.Errorf("service not found")
+	ErrRevisionNotFound     = fmt.Errorf("revision not found")
+	ErrServiceAlreadyExists = fmt.Errorf("service already exists")
 )
 
 // client holds the connection details and the underlying Cloud Run API client.
@@ -102,6 +105,13 @@ func (c *client) Create(ctx context.Context, sm ServiceManifest) (*Service, erro
 	service, err := call.Do()
 	if err != nil {
 		if e, ok := err.(*googleapi.Error); ok {
+			// Cloud Run returns 409 Conflict when a service with this name
+			// already exists. Translate that into a typed sentinel error so
+			// callers (e.g. deployAndSwitchTraffic) can distinguish "I need
+			// to call Update instead" from a real, unexpected failure.
+			if e.Code == http.StatusConflict {
+				return nil, ErrServiceAlreadyExists
+			}
 			return nil, fmt.Errorf("failed to create service: code=%d, message=%s, details=%s", e.Code, e.Message, e.Details)
 		}
 		return nil, err
