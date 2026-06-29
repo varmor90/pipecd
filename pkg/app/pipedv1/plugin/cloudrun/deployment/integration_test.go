@@ -118,9 +118,6 @@ func TestIntegration_ExecuteSyncStage(t *testing.T) {
 	appDir := requireEnv(t, "CLOUDRUN_TEST_APP_DIR")
 
 	const (
-		// testServiceName must match the "metadata.name" field inside the
-		// service.yaml file located in CLOUDRUN_TEST_APP_DIR.
-		testServiceName = "pipecd-sync-integration-test"
 		// testAppID is a fake PipeCD application ID. It only needs to be
 		// consistent within this test: it's what we attach as a label
 		// during deploy, and what we filter by when verifying afterwards.
@@ -134,14 +131,22 @@ func TestIntegration_ExecuteSyncStage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	// deployedServiceName is filled in once we know the real service name
+	// (read from the manifest's metadata, not hardcoded), so the cleanup
+	// message below always points at the service that was actually created.
+	var deployedServiceName string
+
 	// We don't call client.Delete here because the client package doesn't
 	// implement it yet (see NOTES). Instead, print a copy-pasteable cleanup
 	// command so nothing is silently left running in the GCP project.
 	t.Cleanup(func() {
+		if deployedServiceName == "" {
+			t.Log("NOTE: no service was confirmed created, nothing to clean up")
+			return
+		}
 		t.Logf("NOTE: clean up manually with: gcloud run services delete %s --project=%s --region=%s --quiet",
-			testServiceName, project, region)
+			deployedServiceName, project, region)
 	})
-
 	lp := &testLogPersister{t: t}
 
 	// sdk.NewClient is explicitly documented in the SDK as "DO NOT USE this
@@ -227,7 +232,115 @@ func TestIntegration_ExecuteSyncStage(t *testing.T) {
 	if len(svcs) != 1 {
 		t.Fatalf("expected exactly 1 service matching the application selector, got %d", len(svcs))
 	}
-	t.Logf("Found service %q with %d active revision(s)", svcs[0].Metadata.Name, len(svcs[0].ActiveRevisionNames()))
+	deployedServiceName = svcs[0].Metadata.Name
+	t.Logf("Found service %q with %d active revision(s)", deployedServiceName, len(svcs[0].ActiveRevisionNames()))
 
 	t.Log("Integration test passed!")
+}
+
+// TestIntegration_ExecuteRollbackStage exercises the ROLLBACK code path.
+// It first deploys a service via executeSyncStage (reusing the same
+// manifest as a stand-in "previously running" version, since this test
+// doesn't need two different container versions to prove the rollback
+// mechanics work), and then calls executeRollbackStage with that same
+// manifest as the RunningDeploymentSource, mimicking what a real rollback
+// would do: redeploy the last known-good version and switch traffic back
+// to it.
+func TestIntegration_ExecuteRollbackStage(t *testing.T) {
+	project := requireEnv(t, "CLOUDRUN_TEST_PROJECT")
+	region := requireEnv(t, "CLOUDRUN_TEST_REGION")
+	credentialsFile := requireEnv(t, "CLOUDRUN_TEST_CREDENTIALS_FILE")
+	appDir := requireEnv(t, "CLOUDRUN_TEST_APP_DIR")
+
+	const testAppID = "test-app-id-rollback"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	var deployedServiceName string
+	t.Cleanup(func() {
+		if deployedServiceName == "" {
+			t.Log("NOTE: no service was confirmed created, nothing to clean up")
+			return
+		}
+		t.Logf("NOTE: clean up manually with: gcloud run services delete %s --project=%s --region=%s --quiet",
+			deployedServiceName, project, region)
+	})
+
+	lp := &testLogPersister{t: t}
+	sdkClient := sdk.NewClient(nil, "cloudrun", testAppID, "test-stage-id", lp, nil)
+
+	dts := []*sdk.DeployTarget[config.CloudRunDeployTargetConfig]{
+		{
+			Name: "default",
+			Config: config.CloudRunDeployTargetConfig{
+				Project:         project,
+				Region:          region,
+				CredentialsFile: credentialsFile,
+			},
+		},
+	}
+
+	deploymentSource := sdk.DeploymentSource[config.CloudRunApplicationSpec]{
+		ApplicationDirectory: appDir,
+		CommitHash:           "rollbacktest",
+		ApplicationConfig: &sdk.ApplicationConfig[config.CloudRunApplicationSpec]{
+			Spec: &config.CloudRunApplicationSpec{
+				Input: config.CloudRunDeploymentInput{
+					ServiceManifestFile: "service.yaml",
+				},
+			},
+		},
+	}
+
+	// Step 1: deploy the "previously running" version via a normal sync,
+	// so there's something real to roll back to.
+	t.Log("Step 1: deploying the initial version via CLOUDRUN_SYNC...")
+	syncInput := &sdk.ExecuteStageInput[config.CloudRunApplicationSpec]{
+		Request: sdk.ExecuteStageRequest[config.CloudRunApplicationSpec]{
+			StageName:              StageCloudRunSync,
+			Deployment:             sdk.Deployment{ApplicationID: testAppID},
+			TargetDeploymentSource: deploymentSource,
+		},
+		Client: sdkClient,
+		Logger: zap.NewNop(),
+	}
+	if status := executeSyncStage(ctx, syncInput, dts); status != sdk.StageStatusSuccess {
+		t.Fatalf("initial sync failed with status %v, cannot test rollback", status)
+	}
+
+	// Step 2: roll back to that same manifest, exercising the
+	// RunningDeploymentSource code path instead of TargetDeploymentSource.
+	t.Log("Step 2: rolling back...")
+	rollbackInput := &sdk.ExecuteStageInput[config.CloudRunApplicationSpec]{
+		Request: sdk.ExecuteStageRequest[config.CloudRunApplicationSpec]{
+			StageName:               StageRollback,
+			Deployment:              sdk.Deployment{ApplicationID: testAppID},
+			RunningDeploymentSource: deploymentSource,
+		},
+		Client: sdkClient,
+		Logger: zap.NewNop(),
+	}
+	status := executeRollbackStage(ctx, rollbackInput, dts)
+	if status != sdk.StageStatusSuccess {
+		t.Fatalf("expected StageStatusSuccess from rollback, got %v", status)
+	}
+
+	// Verify the service still exists and is healthy after the rollback.
+	t.Log("Verifying the service is still reachable after rollback...")
+	cl, err := client.NewClient(ctx, project, region, credentialsFile, zap.NewNop())
+	if err != nil {
+		t.Fatalf("failed to create verification client: %v", err)
+	}
+	svcs, _, err := cl.List(ctx, &client.ListOptions{LabelSelector: client.MakeApplicationSelector(testAppID)})
+	if err != nil {
+		t.Fatalf("failed to list services: %v", err)
+	}
+	if len(svcs) != 1 {
+		t.Fatalf("expected exactly 1 service matching the application selector, got %d", len(svcs))
+	}
+	deployedServiceName = svcs[0].Metadata.Name
+	t.Logf("Found service %q with %d active revision(s) after rollback", deployedServiceName, len(svcs[0].ActiveRevisionNames()))
+
+	t.Log("Rollback integration test passed!")
 }

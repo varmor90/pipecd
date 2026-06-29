@@ -240,6 +240,8 @@ func FindArtifactVersions(sm ServiceManifest) ([]sdk.ArtifactVersion, error) {
 
 // DecideRevisionName builds a unique revision name from the service name,
 // the image tag, and a short commit hash, e.g. "my-app-v2-a1b2c3d".
+// If the image has no tag (e.g. "gcr.io/cloudrun/hello" with no ":version"),
+// that segment is omitted instead of leaving a stray "--" in the name.
 func DecideRevisionName(sm ServiceManifest, commit string) (string, error) {
 	tag, err := FindImageTag(sm)
 	if err != nil {
@@ -250,5 +252,13 @@ func DecideRevisionName(sm ServiceManifest, commit string) (string, error) {
 	if len(commit) > 7 {
 		commit = commit[:7]
 	}
-	return fmt.Sprintf("%s-%s-%s", sm.Name, tag, commit), nil
+
+	parts := []string{sm.Name}
+	if tag != "" {
+		parts = append(parts, tag)
+	}
+	if commit != "" {
+		parts = append(parts, commit)
+	}
+	return strings.Join(parts, "-"), nil
 }
